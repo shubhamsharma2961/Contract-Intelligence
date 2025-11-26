@@ -20,13 +20,17 @@ def query_llm(system_prompt, user_content, model="gpt-3.5-turbo"):
     if not user_content:
         return "Error: No text content provided for analysis."
         
+    messages = []
+    
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+        
+    messages.append({"role": "user", "content": user_content})
+    
     try:
         response = client.chat.completions.create(
             model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content}
-            ],
+            messages=messages,
             temperature=0.0,
         )
         return response.choices[0].message.content

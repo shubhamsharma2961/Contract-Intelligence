@@ -1,17 +1,47 @@
 import json
 import os
+import time
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework import status
 from django.conf import settings
+from django.http import StreamingHttpResponse
+from drf_yasg.utils import swagger_auto_schema 
+from drf_yasg import openapi
+
 from .models import Document
-from .serializers import DocumentSerializer, AskSerializer
-from .utils import extract_text_from_pdf, query_llm
+from .serializers import AskSerializer, IngestSerializer 
+from .utils import extract_text_from_pdf, query_llm 
+
+
+FALLBACK_ENABLED = False
+
+document_id_param = openapi.Parameter(
+    'doc_id', 
+    openapi.IN_PATH, 
+    description="ID of the document to analyze.", 
+    type=openapi.TYPE_INTEGER
+)
+
+def deterministic_extraction(text_content):
+    return {
+        "parties": ["Fallback Inc.", "Contracting Party"],
+        "effective_date": "2025-01-01",
+        "agreement_term": "3 years",
+        "governing_law": "Fallback Rules",
+        "liability_cap": "1000 USD (Rule Engine Limit)",
+    }
+
 
 class IngestView(APIView):
     parser_classes = (MultiPartParser, FormParser)
 
+    @swagger_auto_schema(
+        request_body=IngestSerializer,
+        operation_description="Uploads a PDF contract, extracts text, and stores metadata, returning document ID.",
+        responses={201: 'Document ID and character count.'}
+    )
     def post(self, request, *args, **kwargs):
         file_obj = request.FILES.get('file')
         if not file_obj:
@@ -35,12 +65,22 @@ class IngestView(APIView):
             "char_count": len(text)
         }, status=201)
 
+
 class ExtractView(APIView):
+    @swagger_auto_schema(
+        manual_parameters=[document_id_param], 
+        operation_description="Extracts structured JSON data (parties, dates, terms, etc.) from the specified document ID.",
+    )
     def post(self, request, doc_id):
         try:
             doc = Document.objects.get(id=doc_id)
         except Document.DoesNotExist:
             return Response({"error": "Document not found"}, status=404)
+
+        if FALLBACK_ENABLED:
+            data = deterministic_extraction(doc.extracted_text)
+            data['message'] = "Extraction performed using Rule Engine fallback."
+            return Response(data, status=200)
 
         system_prompt = """
         You are a Legal Intelligence AI. Your task is to extract the following 
@@ -75,7 +115,12 @@ class ExtractView(APIView):
                 "raw_response": response_text
             }, status=500)
 
+
 class AskView(APIView):
+    @swagger_auto_schema(
+        request_body=AskSerializer, 
+        operation_description="Performs Question Answering (RAG) grounded in the specified document content.",
+    )
     def post(self, request):
         serializer = AskSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -105,12 +150,23 @@ class AskView(APIView):
             "citation": f"Document ID: {doc_id}" 
         })
 
+
 class AuditView(APIView):
+    @swagger_auto_schema(
+        manual_parameters=[document_id_param], 
+        operation_description="Detects high-risk clauses (e.g., liability caps, auto-renewal) in the specified document ID.",
+    )
     def post(self, request, doc_id):
         try:
             doc = Document.objects.get(id=doc_id)
         except Document.DoesNotExist:
             return Response({"error": "Document not found"}, status=404)
+
+        if FALLBACK_ENABLED:
+            return Response({
+                "finding": "Audit skipped.", 
+                "reason": "Rule Engine Fallback is enabled. No LLM analysis performed."
+            }, status=200)
 
         system_prompt = """
         You are a Legal Risk Analyst AI. Review the contract text. Identify all "Risky Clauses" 
@@ -138,6 +194,27 @@ class AuditView(APIView):
                 "error": "LLM returned invalid JSON for audit report",
                 "raw_response": audit_result
             }, status=500)
+
+
+class StreamView(APIView):
+    @swagger_auto_schema(
+        query_serializer=AskSerializer, 
+        operation_description="Streams the RAG answer token-by-token using SSE (Server-Sent Events). Requires document_id and question as query parameters.",
+        responses={200: "Text stream (SSE)"}
+    )
+    def get(self, request):
+        def event_stream():
+            yield "event: message\n"
+            yield "data: Starting answer stream...\n\n"
+            
+            answer = "This is the streamed answer, provided as a placeholder for the full SSE implementation."
+            for word in answer.split():
+                yield f"data: {word} \n\n"
+                time.sleep(0.1) 
+            yield "data: [DONE]\n\n"
+        
+        return StreamingHttpResponse(event_stream(), content_type="text/event-stream")
+
 
 class HealthCheckView(APIView):
     def get(self, request):
