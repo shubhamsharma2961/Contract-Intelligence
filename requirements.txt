@@ -1,0 +1,10 @@
+Django>=4.2
+djangorestframework
+drf-yasg          
+psycopg2-binary   
+pypdf             
+openai            
+python-dotenv    
+tiktoken         
+numpy
+requests
